@@ -268,37 +268,24 @@ async function startServer() {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     try {
-      const [metricsRes, returnRes] = await Promise.all([
-        pool.query(`
-          SELECT
-            COUNT(*) FILTER (WHERE ai_hint_used) AS ai_hint_count,
-            COUNT(*) AS total_games,
-            AVG(turns_played) AS avg_turns,
-            COUNT(*) FILTER (WHERE winner = 'blue')::float / NULLIF(COUNT(*),0) AS blue_win_rate
-          FROM game_metrics
-          WHERE created_at > NOW() - INTERVAL '30 days'
-        `),
-        pool.query(`
-          SELECT COUNT(DISTINCT session_id) FILTER (
-            WHERE session_id IN (
-              SELECT session_id FROM game_metrics
-              GROUP BY session_id HAVING COUNT(*) > 1
-            )
-          )::float / NULLIF(COUNT(DISTINCT session_id), 0) AS rematch_rate
-          FROM game_metrics
-          WHERE created_at > NOW() - INTERVAL '30 days'
-        `),
-      ]);
+      const metricsRes = await pool.query(`
+        SELECT
+          COUNT(*) AS total_games,
+          COUNT(*) FILTER (WHERE winner IS NOT NULL) AS completed_games,
+          COUNT(*) FILTER (WHERE winner = 'blue')::float / NULLIF(COUNT(*) FILTER (WHERE winner IS NOT NULL), 0) AS blue_win_rate,
+          COUNT(*) FILTER (WHERE adult_mode = true)::float / NULLIF(COUNT(*), 0) AS adult_mode_rate
+        FROM game_history
+        WHERE created_at > NOW() - INTERVAL '30 days'
+      `);
       const m = metricsRes.rows[0] || {};
       res.json({
         project: 'codenames',
         generated_at: new Date().toISOString(),
         kpis: {
-          rematch_rate: { value: parseFloat((parseFloat(returnRes.rows[0]?.rematch_rate || 0) * 100).toFixed(1)), label: 'Rematch Rate', unit: '%' },
-          ai_hint_usage_rate: { value: parseFloat((parseFloat(m.ai_hint_count || 0) / Math.max(parseInt(m.total_games || 1), 1) * 100).toFixed(1)), label: 'AI Hint Usage Rate', unit: '%' },
-          avg_turns_to_end: { value: parseFloat(parseFloat(m.avg_turns || 0).toFixed(1)), label: 'Avg Turns to End', unit: 'turns' },
-          blue_win_rate: { value: parseFloat((parseFloat(m.blue_win_rate || 0) * 100).toFixed(1)), label: 'Blue Team Win Rate', unit: '%' },
-          total_games_30d: { value: parseInt(m.total_games || 0), label: 'Total Games (30d)', unit: 'games' },
+          total_games_30d:   { value: parseInt(m.total_games || 0), label: 'Total Games (30d)', unit: 'games' },
+          completed_games_30d: { value: parseInt(m.completed_games || 0), label: 'Completed Games (30d)', unit: 'games' },
+          blue_win_rate:     { value: parseFloat((parseFloat(m.blue_win_rate || 0) * 100).toFixed(1)), label: 'Blue Team Win Rate', unit: '%' },
+          adult_mode_rate:   { value: parseFloat((parseFloat(m.adult_mode_rate || 0) * 100).toFixed(1)), label: 'Adult Mode Usage', unit: '%' },
         }
       });
     } catch (err) {
