@@ -100,6 +100,18 @@ async function startServer() {
     )
   `);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS game_metrics (
+      id SERIAL PRIMARY KEY,
+      game_id TEXT,
+      ai_hint_used BOOLEAN DEFAULT FALSE,
+      turns_played INT,
+      winner TEXT,
+      session_id TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
   let vite;
   if (!isProd) {
     // --- DEVELOPMENT MODE ---
@@ -249,6 +261,50 @@ async function startServer() {
 
   app.get("/health", (req, res) => {
     res.json({ status: "ok", uptime: process.uptime() });
+  });
+
+  app.get('/api/kpi', async (req, res) => {
+    if (req.headers['x-kpi-api-key'] !== process.env.KPI_API_KEY) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    try {
+      const [metricsRes, returnRes] = await Promise.all([
+        pool.query(`
+          SELECT
+            COUNT(*) FILTER (WHERE ai_hint_used) AS ai_hint_count,
+            COUNT(*) AS total_games,
+            AVG(turns_played) AS avg_turns,
+            COUNT(*) FILTER (WHERE winner = 'blue')::float / NULLIF(COUNT(*),0) AS blue_win_rate
+          FROM game_metrics
+          WHERE created_at > NOW() - INTERVAL '30 days'
+        `),
+        pool.query(`
+          SELECT COUNT(DISTINCT session_id) FILTER (
+            WHERE session_id IN (
+              SELECT session_id FROM game_metrics
+              GROUP BY session_id HAVING COUNT(*) > 1
+            )
+          )::float / NULLIF(COUNT(DISTINCT session_id), 0) AS rematch_rate
+          FROM game_metrics
+          WHERE created_at > NOW() - INTERVAL '30 days'
+        `),
+      ]);
+      const m = metricsRes.rows[0] || {};
+      res.json({
+        project: 'codenames',
+        generated_at: new Date().toISOString(),
+        kpis: {
+          rematch_rate: { value: parseFloat((parseFloat(returnRes.rows[0]?.rematch_rate || 0) * 100).toFixed(1)), label: 'Rematch Rate', unit: '%' },
+          ai_hint_usage_rate: { value: parseFloat((parseFloat(m.ai_hint_count || 0) / Math.max(parseInt(m.total_games || 1), 1) * 100).toFixed(1)), label: 'AI Hint Usage Rate', unit: '%' },
+          avg_turns_to_end: { value: parseFloat(parseFloat(m.avg_turns || 0).toFixed(1)), label: 'Avg Turns to End', unit: 'turns' },
+          blue_win_rate: { value: parseFloat((parseFloat(m.blue_win_rate || 0) * 100).toFixed(1)), label: 'Blue Team Win Rate', unit: '%' },
+          total_games_30d: { value: parseInt(m.total_games || 0), label: 'Total Games (30d)', unit: 'games' },
+        }
+      });
+    } catch (err) {
+      console.error('KPI error:', err);
+      res.status(500).json({ error: 'Internal server error' });
+    }
   });
 
   app.post("/game/:id/abandon", async (req, res) => {
