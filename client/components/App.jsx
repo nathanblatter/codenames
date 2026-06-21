@@ -6,6 +6,7 @@ import SpymasterPage from "./SpymasterPage";
 import AdminPage from "./AdminPage";
 import WinnerOverlay from "./WinnerOverlay";
 import Auth from "./auth";
+import BugReport from "./BugReport";
 
 export default function App() {
   const [mounted, setMounted] = useState(false);
@@ -13,11 +14,14 @@ export default function App() {
   if (!mounted) return null;
 
   const params = new URLSearchParams(window.location.search);
-  if (params.get("view") === "spymaster") {
-    return <SpymasterPage />;
-  }
+  const view = params.get("view") === "spymaster" ? <SpymasterPage /> : <GameContent />;
 
-  return <GameContent />;
+  return (
+    <>
+      {view}
+      <BugReport />
+    </>
+  );
 }
 
 function SettingsPanel({ settings, onChange, onClose, themes }) {
