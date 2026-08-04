@@ -6,6 +6,7 @@ import "dotenv/config";
 import OpenAI from "openai";
 import { Pool } from 'pg';     // <--- Added for DB
 import bcrypt from 'bcrypt';   // <--- Added for security
+import multer from 'multer';   // <--- Bug-report screenshot uploads
 
 // --- Environment Setup ---
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -552,11 +553,69 @@ async function startServer() {
         }),
       });
       if (!r.ok) throw new Error("ingest " + r.status);
-      res.json({ ok: true });
+      const created = await r.json().catch(() => null);
+      res.json({ ok: true, id: created?.id || null });
     } catch (err) {
       console.error("bug-report forward failed:", err);
       res.status(502).json({ error: "Could not reach the bug tracker." });
     }
+  });
+
+  // --- Bug report screenshots → flightdeck attachments ---
+  const SCREENSHOT_MAX_FILES = 4;
+  const SCREENSHOT_MAX_BYTES = 8 * 1024 * 1024; // 8MB each
+  const SCREENSHOT_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+  const screenshotUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { files: SCREENSHOT_MAX_FILES, fileSize: SCREENSHOT_MAX_BYTES },
+    fileFilter: (req, file, cb) => {
+      if (!SCREENSHOT_TYPES.has(file.mimetype)) {
+        return cb(new Error("UNSUPPORTED_TYPE"));
+      }
+      cb(null, true);
+    },
+  });
+
+  app.post("/api/bug-report/:id/screenshots", (req, res) => {
+    const key = process.env.FLIGHTDECK_INGEST_KEY;
+    if (!key) return res.status(503).json({ error: "Bug reporting is not configured." });
+    const itemId = req.params.id;
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(itemId)) {
+      return res.status(400).json({ error: "Invalid report id." });
+    }
+    screenshotUpload.array("files")(req, res, async (err) => {
+      if (err) {
+        if (err.code === "LIMIT_FILE_SIZE") return res.status(413).json({ error: "Each screenshot must be under 8MB." });
+        if (err.code === "LIMIT_FILE_COUNT" || err.code === "LIMIT_UNEXPECTED_FILE") return res.status(400).json({ error: "Up to 4 screenshots per report." });
+        if (err.message === "UNSUPPORTED_TYPE") return res.status(400).json({ error: "Screenshots must be PNG, JPEG, WebP, or GIF images." });
+        console.error("screenshot upload parse failed:", err);
+        return res.status(400).json({ error: "Could not read the uploaded files." });
+      }
+      const files = req.files || [];
+      if (!files.length) return res.status(400).json({ error: "No screenshots attached." });
+      const base = (process.env.FLIGHTDECK_URL || "http://flightdeck:8080").replace(/\/$/, "");
+      try {
+        const form = new FormData();
+        for (const f of files) {
+          form.append("files", new Blob([f.buffer], { type: f.mimetype }), f.originalname || "screenshot.png");
+        }
+        const r = await fetch(`${base}/api/ingest/attachments/${itemId}`, {
+          method: "POST",
+          headers: { "X-API-Key": key },
+          body: form,
+        });
+        const body = await r.json().catch(() => null);
+        if (!r.ok) {
+          console.error("screenshot forward rejected:", r.status, body);
+          return res.status(r.status === 404 || r.status === 400 || r.status === 413 ? r.status : 502)
+            .json({ error: body?.error || "Could not attach screenshots." });
+        }
+        res.status(201).json(body || []);
+      } catch (fwdErr) {
+        console.error("screenshot forward failed:", fwdErr);
+        res.status(502).json({ error: "Could not reach the bug tracker." });
+      }
+    });
   });
 
   // --- SSR Handler ---
